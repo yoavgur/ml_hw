@@ -43,7 +43,23 @@ for layer_name in layers:
         W = layer.weight
         W.requires_grad = False
         for _ in range(consts.BF_PER_LAYER):
-            # FILL ME: flip a random bit in a randomly picked weight, measure RAD, and restore weight
+            weight_shape = W.shape
+            random_weight_index = random.randint(0, weight_shape[0] - 1)
+
+            random_weight_index = np.random.randint(W.numel())
+            original_weight = W.view(-1)[random_weight_index].item()
+
+            acc0 = utils.compute_accuracy(model, data_loader, device)
+
+            flipped_weight, bf_idx = utils.random_bit_flip(original_weight)
+            W.view(-1)[random_weight_index] = flipped_weight
+
+            acc_bf = utils.compute_accuracy(model, data_loader, device)
+
+            W.view(-1)[random_weight_index] = original_weight
+
+            rad = (acc0 - acc_bf) / acc0
+
             RADs_bf_idx[bf_idx].append(rad)
             RADs_all.append(rad)
 
@@ -51,9 +67,14 @@ for layer_name in layers:
 RADs_all = np.array(RADs_all)
 print(f'Total # weights flipped: {len(RADs_all)}')
 print(f'Max RAD: {np.max(RADs_all):0.4f}')
-print(f'RAD>10%: {np.sum(RADs_all > 0.1) / RADs_all.size:0.4f}')
+print(f'RAD>15%: {np.sum(RADs_all > 0.15) / RADs_all.size:0.4f}')
 
 # boxplots: bit-flip index vs. RAD
 plt.figure()
 # FILL ME
+plt.boxplot(list(RADs_bf_idx.values()))
+plt.xlabel('Bit-Flip Index')
+plt.ylabel('Relative Accuracy Drop (RAD)')
+plt.title('Bit-Flip Index vs. RAD')
+plt.xticks(range(1, 33))
 plt.savefig('bf_idx-vs-RAD.jpg')

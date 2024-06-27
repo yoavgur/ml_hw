@@ -9,7 +9,7 @@ class PGDAttack:
     """
 
     def __init__(self, model, eps=8 / 255., n=50, alpha=1 / 255.,
-                 rand_init=True, early_stop=True):
+             rand_init=True, early_stop=True):
         """
         Parameters:
         - model: model to attack
@@ -17,11 +17,11 @@ class PGDAttack:
         - n: max # attack iterations
         - alpha: step size at each iteration
         - rand_init: a flag denoting whether to randomly initialize
-              adversarial samples in the range [x-eps, x+eps]
+            adversarial samples in the range [x-eps, x+eps]
         - early_stop: a flag denoting whether to stop perturbing a 
-              sample once the attack goal is met. If the goal is met
-              for all samples in the batch, then the attack returns
-              early, before completing all the iterations.
+            sample once the attack goal is met. If the goal is met
+            for all samples in the batch, then the attack returns
+            early, before completing all the iterations.
         """
         self.model = model
         self.n = n
@@ -40,7 +40,45 @@ class PGDAttack:
         performs random initialization and early stopping, depending on the 
         self.rand_init and self.early_stop flags.
         """
-        pass  # FILL ME
+        x_adv = x.clone().to(x.device)
+        if self.rand_init:
+            x_adv = x_adv + torch.rand_like(x) * 2 * self.eps - self.eps
+            x_adv = torch.clip(x_adv, 0, 1).to(x.device)
+
+        for _ in range(self.n):
+            x_adv.requires_grad_(True)
+
+            logits = self.model(x_adv)
+            loss = self.loss_func(logits, y)
+
+            # Get gradient of the loss
+            grad = torch.autograd.grad(loss.sum(), x_adv)[0]
+
+            if targeted:
+                delta = -self.alpha * torch.sign(grad)
+            else:
+                delta = self.alpha * torch.sign(grad)
+
+            x_adv = x_adv + delta
+            x_adv = torch.clip(x_adv, x - self.eps, x + self.eps)
+            x_adv = torch.clip(x_adv, 0, 1)
+            x_adv.detach_()
+
+            if self.early_stop:
+                preds = self.model(x_adv).argmax(dim=1)
+                if targeted:
+                    if (preds == y).all():
+                        break
+                else:
+                    if (preds != y).all():
+                        break
+
+        return x_adv, y
+
+
+
+
+
 
 
 class NESBBoxPGDAttack:
@@ -51,7 +89,7 @@ class NESBBoxPGDAttack:
     """
 
     def __init__(self, model, eps=8 / 255., n=50, alpha=1 / 255., momentum=0.,
-                 k=200, sigma=1 / 255., rand_init=True, early_stop=True):
+             k=200, sigma=1 / 255., rand_init=True, early_stop=True):
         """
         Parameters:
         - model: model to attack
@@ -59,16 +97,16 @@ class NESBBoxPGDAttack:
         - n: max # attack iterations
         - alpha: PGD's step size at each iteration
         - momentum: a value in [0., 1.) controlling the "weight" of
-             historical gradients estimating gradients at each iteration
+            historical gradients estimating gradients at each iteration
         - k: the model is queries 2*k times at each iteration via 
-              antithetic sampling to approximate the gradients
+            antithetic sampling to approximate the gradients
         - sigma: the std of the Gaussian noise used for querying
         - rand_init: a flag denoting whether to randomly initialize
-              adversarial samples in the range [x-eps, x+eps]
+            adversarial samples in the range [x-eps, x+eps]
         - early_stop: a flag denoting whether to stop perturbing a 
-              sample once the attack goal is met. If the goal is met
-              for all samples in the batch, then the attack returns
-              early, before completing all the iterations.
+            sample once the attack goal is met. If the goal is met
+            for all samples in the batch, then the attack returns
+            early, before completing all the iterations.
         """
         self.model = model
         self.eps = eps
@@ -81,6 +119,26 @@ class NESBBoxPGDAttack:
         self.early_stop = early_stop
         self.loss_func = nn.CrossEntropyLoss(reduction='none')
 
+    def nes_gradient_estimate(self, x, y):
+        g = torch.zeros_like(x)
+        nqueries = torch.zeros(len(x), device=x.device)
+        
+        for _ in range(self.k):
+            u = torch.randn_like(x) * self.sigma
+            g_plus = self.model(x + u)
+            nqueries += torch.ones(len(x), device=x.device)
+
+            g_minus = self.model(x - u)
+            nqueries += torch.ones(len(x), device=x.device)
+
+            loss_plus = self.loss_func(g_plus, y)
+            loss_minus = self.loss_func(g_minus, y)
+            diff = (loss_plus - loss_minus).view(-1, 1, 1, 1)
+            g += diff * u
+
+        g /= (2 * self.sigma * self.k)
+        return g, nqueries
+
     def execute(self, x, y, targeted=False):
         """
         Executes the attack on a batch of samples x. y contains the true labels 
@@ -91,7 +149,40 @@ class NESBBoxPGDAttack:
         2- A vector with dimensionality len(x) containing the number of queries for
             each sample in x.
         """
-        pass  # FILL ME
+        with torch.no_grad():
+            nqueries = torch.zeros(len(x), device=x.device)
+
+            x_adv = x.clone().to(x.device)
+            if self.rand_init:
+                x_adv = x_adv + torch.rand_like(x) * 2 * self.eps - self.eps
+                x_adv = torch.clip(x_adv, 0, 1).to(x.device)
+
+            if targeted:
+                sign = -1
+            else:
+                sign = 1
+
+            momentum = torch.zeros_like(x)
+
+            for i in range(self.n):
+                grad, added_queries = self.nes_gradient_estimate(x_adv, y)
+                nqueries += added_queries
+
+                momentum = self.momentum * momentum + (1 - self.momentum) * grad
+                x_adv += self.alpha * sign * torch.sign(momentum)
+                x_adv = torch.clip(x_adv, x - self.eps, x + self.eps)
+                x_adv = torch.clip(x_adv, 0, 1)
+
+                if self.early_stop:
+                    preds = self.model(x_adv).argmax(dim=1)
+                    if targeted:
+                        if (preds == y).all():
+                            break
+                    else:
+                        if (preds != y).all():
+                            break
+
+            return x_adv, nqueries
 
 
 class PGDEnsembleAttack:
@@ -101,20 +192,20 @@ class PGDEnsembleAttack:
     """
 
     def __init__(self, models, eps=8 / 255., n=50, alpha=1 / 255.,
-                 rand_init=True, early_stop=True):
+             rand_init=True, early_stop=True):
         """
         Parameters:
         - models (a sequence): an ensemble of models to attack (i.e., the
-              attack aims to decrease their expected loss)
+            attack aims to decrease their expected loss)
         - eps: attack's maximum norm
         - n: max # attack iterations
         - alpha: PGD's step size at each iteration
         - rand_init: a flag denoting whether to randomly initialize
-              adversarial samples in the range [x-eps, x+eps]
+            adversarial samples in the range [x-eps, x+eps]
         - early_stop: a flag denoting whether to stop perturbing a 
-              sample once the attack goal is met. If the goal is met
-              for all samples in the batch, then the attack returns
-              early, before completing all the iterations.
+            sample once the attack goal is met. If the goal is met
+            for all samples in the batch, then the attack returns
+            early, before completing all the iterations.
         """
         self.models = models
         self.n = n
@@ -131,4 +222,39 @@ class PGDEnsembleAttack:
         attacks. The method returns the adversarially perturbed samples, which
         lie in the ranges [0, 1] and [x-eps, x+eps].
         """
-        pass  # FILL ME
+        x_adv = x.clone().to(x.device)
+        if self.rand_init:
+            x_adv = x_adv + torch.rand_like(x) * 2 * self.eps - self.eps
+            x_adv = torch.clip(x_adv, 0, 1).to(x.device)
+
+        for _ in range(self.n):
+            x_adv.requires_grad_(True)
+            losses = torch.zeros(len(x), device=x.device)
+
+            for model in self.models:
+                logits = model(x_adv)
+                losses += self.loss_func(logits, y)
+
+            grad = torch.autograd.grad(losses.sum(), x_adv)[0]
+
+            if targeted:
+                delta = -self.alpha * torch.sign(grad)
+            else:
+                delta = self.alpha * torch.sign(grad)
+
+            x_adv = x_adv + delta
+            x_adv = torch.clip(x_adv, x - self.eps, x + self.eps)
+            x_adv = torch.clip(x_adv, 0, 1)
+            x_adv.detach_()
+
+            if self.early_stop:
+                with torch.no_grad():
+                    preds = self.models[0](x_adv).argmax(dim=1)
+                    if targeted:
+                        if (preds == y).all():
+                            break
+                    else:
+                        if (preds != y).all():
+                            break
+
+        return x_adv, y

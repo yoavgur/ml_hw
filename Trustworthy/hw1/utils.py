@@ -46,8 +46,18 @@ def compute_accuracy(model, data_loader, device):
     (a number in [0, 1]) on the labeled data returned by 
     data_loader.
     """
-    pass  # FILL ME
+    
+    total = 0
+    correct = 0
+    for x, y in data_loader:
+        x, y = x.to(device), y.to(device)
+        with torch.no_grad():
+            logits = model(x)
+            pred = logits.argmax(dim=1)
+            correct += (pred == y).sum().item()
+            total += y.size(0)
 
+    return correct / total
 
 def run_whitebox_attack(attack, data_loader, targeted, device, n_classes=4):
     """
@@ -60,7 +70,18 @@ def run_whitebox_attack(attack, data_loader, targeted, device, n_classes=4):
     2- True labels in case of untargeted attacks, and target labels in
        case of targeted attacks.
     """
-    pass  # FILL ME
+    x_advs, ys = [], []
+
+    for x, y in data_loader:
+        x, y = x.to(device), y.to(device)
+        if targeted:
+            y = ((y + torch.randint(1, n_classes, (y.size(0),)).to(device)) % n_classes).to(device)
+
+        x_adv, y = attack.execute(x, y, targeted)
+        x_advs.append(x_adv)
+        ys.append(y)
+
+    return torch.cat(x_advs), torch.cat(ys)
 
 
 def run_blackbox_attack(attack, data_loader, targeted, device, n_classes=4):
@@ -75,7 +96,20 @@ def run_blackbox_attack(attack, data_loader, targeted, device, n_classes=4):
        case of targeted attacks.
     3- The number of queries made to create each adversarial example.
     """
-    pass  # FILL ME
+    x_advs, ys, n_queriess = [], [], []
+
+    for x, y in data_loader:
+        x, y = x.to(device), y.to(device)
+        if targeted:
+            y = ((y + torch.randint(1, n_classes, (y.size(0),)).to(device)) % n_classes).to(device)
+
+        x_adv, n_queries = attack.execute(x, y, targeted)
+
+        x_advs.append(x_adv)
+        ys.append(y)
+        n_queriess.append(n_queries)
+
+    return torch.cat(x_advs), torch.cat(ys), torch.cat(n_queriess)
 
 
 def compute_attack_success(model, x_adv, y, batch_size, targeted, device):
@@ -84,7 +118,16 @@ def compute_attack_success(model, x_adv, y, batch_size, targeted, device):
     attacks. y contains the true labels in case of untargeted attacks,
     and the target labels in case of targeted attacks.
     """
-    pass  # FILL ME
+    with torch.no_grad():
+        x_adv = x_adv.to(device)
+        preds = model(x_adv).argmax(dim=1)
+
+        if targeted:
+            return (preds == y).float().mean().item()
+        else:
+            return (preds != y).float().mean().item()
+
+
 
 
 def binary(num):
@@ -93,7 +136,7 @@ def binary(num):
     binary representation (in big-endian, where the string only
     contains '0' and '1' characters).
     """
-    pass  # FILL ME
+    return ''.join(format(struct.unpack('!I', struct.pack('!f', num))[0], '032b'))
 
 
 def float32(binary):
@@ -102,7 +145,7 @@ def float32(binary):
     binary representations of float32 numbers into float32 and returns the
     result.
     """
-    pass  # FILL ME
+    return struct.unpack('!f', struct.pack('!I', int(binary, 2)))[0]
 
 
 def random_bit_flip(w):
@@ -112,4 +155,8 @@ def random_bit_flip(w):
     1- The weight with the bit flipped
     2- The index of the flipped bit in {0, 1, ..., 31}
     """
-    pass  # FILL ME
+    binary_rep = binary(w)
+    idx = np.random.choice(32)
+    flipped = '1' if binary_rep[idx] == '0' else '0'
+    binary_rep = binary_rep[:idx] + flipped + binary_rep[idx+1:]
+    return float32(binary_rep), idx
