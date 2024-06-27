@@ -124,11 +124,11 @@ class NESBBoxPGDAttack:
         nqueries = torch.zeros(len(x), device=x.device)
         
         for _ in range(self.k):
-            u = torch.randn_like(x) * self.sigma
-            g_plus = self.model(x + u)
+            u = torch.randn_like(x)
+            g_plus = self.model(x + u * self.sigma)
             nqueries += torch.ones(len(x), device=x.device)
 
-            g_minus = self.model(x - u)
+            g_minus = self.model(x - u * self.sigma)
             nqueries += torch.ones(len(x), device=x.device)
 
             loss_plus = self.loss_func(g_plus, y)
