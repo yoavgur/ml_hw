@@ -59,9 +59,17 @@ def plot_radii(radii):
     x = [] # radius
     y = [] # accuracy
     # derive x and y from the certified radii - FILL ME
-    
+
+    max_radius = max(radii)
+    thresholds = np.linspace(0, max_radius+0.001, num=1000)
+
+    for threshold in thresholds:
+        accuracy = np.mean(np.array(radii) >= threshold)
+        x.append(threshold)
+        y.append(accuracy)
+
     # plot
-    plt.plot(x,y)
+    plt.plot(x, y)
 
 if __name__=='__main__':
     sigmas = [0.05, 0.20]

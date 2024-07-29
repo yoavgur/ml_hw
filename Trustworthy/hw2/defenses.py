@@ -35,16 +35,47 @@ def free_adv_train(model, data_tr, criterion, optimizer, lr_scheduler, \
                            
 
     # init delta (adv. perturbation) - FILL ME
+    delta = torch.zeros([batch_size, *data_tr[0][0].shape]).to(device)
     
 
     # total number of updates - FILL ME
-    
+    total_updates = epochs * len(loader_tr)
 
     # when to update lr
     scheduler_step_iters = int(np.ceil(len(data_tr)/batch_size))
 
     # train - FILLE ME
-    
+    for epoch in range(epochs):
+        for i, (inputs, targets) in enumerate(loader_tr, 0):
+            # get inputs and labels
+            inputs, labels = inputs.to(device), targets.to(device)
+            inputs.requires_grad = True
+
+            for _ in range(m):
+                # zero the parameter gradients
+                optimizer.zero_grad()
+
+                # If batch size is smaller (last batch), adjust delta
+                _delta = delta[:inputs.size(0)]
+
+                # forward + backward + optimize
+                outputs = model(inputs + _delta)
+                loss = criterion(outputs, labels)
+                loss.backward()
+                optimizer.step()
+
+                # update delta
+                with torch.no_grad():
+                    _delta += eps*torch.sign(inputs.grad)
+                    _delta = torch.clamp(_delta, -eps, eps)
+
+                # update original delta
+                delta[:inputs.size(0)] = _delta
+
+
+            # update learning rate
+            if (i+1) % scheduler_step_iters == 0:
+                lr_scheduler.step()
     
     # done
     return model
@@ -70,8 +101,38 @@ class SmoothedModel():
         array counting how many times each class was assigned the
         max confidence).
         """
-        # FILL ME
-        pass
+        nb_classes = 4
+        counts = np.zeros(nb_classes)
+        with torch.no_grad():
+            for _ in range(0, n, batch_size):
+                batch_x = x.repeat(batch_size, 1, 1, 1)
+                batch_x += torch.randn_like(batch_x) * self.sigma
+
+                outputs = self.model(batch_x)
+                _, preds = torch.max(outputs, 1)
+                counts += np.bincount(preds.cpu().numpy(), minlength=nb_classes)
+
+        return counts
+
+    
+    def __sample_under_noise(self, x, n, batch_size):
+        """
+        Classify input x under noise n times (with batch size 
+        equal to batch_size) and return class counts (i.e., an
+        array counting how many times each class was assigned the
+        max confidence).
+        """
+        nb_classes = 4
+        counts = np.zeros(nb_classes)
+        with torch.no_grad():
+            x_batch = x.repeat(n, 1, 1, 1)
+            x_batch += torch.randn_like(x_batch) * self.sigma
+
+            outputs = self.model(x_batch)
+            _, preds = torch.max(outputs, 1)
+            counts = np.bincount(preds.cpu().numpy(), minlength=nb_classes)
+
+        return counts
         
     def certify(self, x, n0, n, alpha, batch_size):
         """
@@ -90,10 +151,18 @@ class SmoothedModel():
         """
         
         # find prediction (top class c) - FILL ME
-        
+        counts0 = self._sample_under_noise(x, n0, batch_size)
+        c = counts0.argmax()
         
         # compute lower bound on p_c - FILL ME
+        counts = self._sample_under_noise(x, n, batch_size)
+        p, _ = proportion_confint(counts[c].item(), ((n // batch_size) + 1)*batch_size, alpha=2*alpha, method="beta")
         
+        if p > 0.5:
+            radius = self.sigma * norm.ppf(p)
+        else:
+            c = self.ABSTAIN
+            radius = 0.0
 
         # done
         return c, radius
@@ -134,10 +203,38 @@ class NeuralCleanse:
         - trigger: 
         """
         # randomly initialize mask and trigger in [0,1] - FILL ME
-        
+        mask = torch.rand((self.dim[2], self.dim[3]), device=device, requires_grad=True)
+        trigger = torch.rand(self.dim, device=device, requires_grad=True)
 
         # run self.niters of SGD to find (potential) trigger and mask - FILL ME
-        
+        optimizer = torch.optim.Adam([mask, trigger], lr=self.step_size)
+
+        for _ in range(self.niters):
+            for inputs, _ in data_loader:
+                inputs = inputs.to(device)
+                expanded_mask = mask.repeat(inputs.size(1), 1, 1).unsqueeze(0).expand_as(inputs)
+                # Apply the trigger and mask to the inputs
+                perturbed_inputs = inputs * (1 - expanded_mask) + trigger * expanded_mask
+
+                # Forward pass
+                outputs = self.model(perturbed_inputs)
+
+                # Compute the classification loss
+                target_labels = torch.full((inputs.size(0),), c_t, device=device, dtype=torch.long)
+                loss_class = self.loss_func(outputs, target_labels)
+
+                # Compute the mask norm loss
+                mask_norm = mask.abs().sum()
+                loss = loss_class + self.lambda_c * mask_norm
+
+                # Backward pass and optimization step
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+
+                # Clamp mask and trigger to [0, 1]
+                mask.data.clamp_(0, 1)
+                trigger.data.clamp_(0, 1)
 
         # done
-        return mask, trigger
+        return mask.repeat(3, 1, 1), trigger
